@@ -3,7 +3,12 @@ name: Sync Upstream
 on:
   schedule:
     - cron: '17 */6 * * *'   # 每6小时同步一次(避开整点高峰)
-  workflow_dispatch: {}      # 支持手动触发
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        description: '强制重新部署(跳过变更检测)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -13,13 +18,44 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  sync:
+  sync-deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Sync fork with upstream
-        run: gh repo sync "$GITHUB_REPOSITORY" --source huilang-me/CF-Server-Monitor --branch main
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # 完整历史，merge 需要
+
+      - name: Merge upstream into fork
+        id: merge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/huilang-me/CF-Server-Monitor.git
+          git fetch upstream main
+          HEAD_SHA=$(git rev-parse HEAD)
+          UP_SHA=$(git rev-parse upstream/main)
+          echo "fork:   ${HEAD_SHA:0:8}"
+          echo "upstream: ${UP_SHA:0:8}"
+          if [ "$HEAD_SHA" != "$UP_SHA" ]; then
+            git merge upstream/main --no-edit --no-ff -m "chore: sync upstream ${UP_SHA:0:8}"
+            git push origin main
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "已有上游最新代码, 无需合并"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Deploy to Cloudflare Workers
+        if: steps.merge.outputs.changed == 'true' || github.event.inputs.force_deploy == 'true'
+        run: npm run deploy
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
       - name: Show result
         run: |
-          echo "Synced $(date -u) -> $(git ls-remote https://github.com/InkiChang/CF-Server-Monitor.git main | cut -c1-8)  (upstream: $(git ls-remote https://github.com/huilang-me/CF-Server-Monitor.git main | cut -c1-8))"
+          echo "fork: $(git ls-remote https://github.com/InkiChang/CF-Server-Monitor.git main | cut -c1-8)  upstream: $(git ls-remote https://github.com/huilang-me/CF-Server-Monitor.git main | cut -c1-8)"
